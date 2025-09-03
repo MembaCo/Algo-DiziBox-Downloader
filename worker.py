@@ -8,7 +8,7 @@ import os
 import sys
 import logging
 import glob
-import undetected_chromedriver as uc
+from seleniumwire import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -52,57 +52,88 @@ def _update_status_worker(
 
 
 def find_manifest_url(target_url):
-    """Tespit edilemeyen chromedriver ile manifest URL'sini bulur."""
+    """
+    Reklam videosunu filtreleyerek asıl içeriğin manifest URL'sini yakalar.
+    """
     options = uc.ChromeOptions()
     # options.add_argument("--headless")
-    options.add_argument(f"user-agent={config.USER_AGENT}")
     options.add_argument("--window-size=1280,720")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--mute-audio")  # Tarayıcı sesini kapatır
 
     driver = None
     try:
-        # --- KİLİT DEĞİŞİKLİK ---
-        # version_main parametresini kaldırarak kütüphanenin
-        # doğru sürücüyü otomatik bulmasını sağlıyoruz.
         driver = uc.Chrome(options=options)
 
-        wait = WebDriverWait(driver, 30)
-        logger.info(f"Bölüm sayfasına gidiliyor: {target_url}")
+        logger.info(f"Ana bölüm sayfasına gidiliyor: {target_url}")
         driver.get(target_url)
+        wait = WebDriverWait(driver, 20)
 
-        logger.info("İlk iframe'in var olması bekleniyor...")
-        iframe_locator_1 = (By.CSS_SELECTOR, "div.player-content > iframe")
-        wait.until(EC.presence_of_element_located(iframe_locator_1))
-        driver.switch_to.frame(driver.find_element(*iframe_locator_1))
-
-        logger.info("İkinci iframe'in var olması bekleniyor...")
-        iframe_locator_2 = (By.TAG_NAME, "iframe")
-        wait.until(EC.presence_of_element_located(iframe_locator_2))
-        driver.switch_to.frame(driver.find_element(*iframe_locator_2))
-
-        time.sleep(5)
-
-        page_source = driver.page_source
-        manifest_match = re.search(
-            r'file:"(https?://[^\s"]+\.m3u8[^\s"]*)"', page_source
+        logger.info("Video oynatıcı iframe'i aranıyor...")
+        player_iframe_element = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "div.video-container iframe")
+            )
         )
+        iframe_url = player_iframe_element.get_attribute("src")
 
-        if not manifest_match:
-            logger.warning("Manifest URL'si sayfa kaynağında bulunamadı.")
-            raise TimeoutException
+        if not iframe_url:
+            logger.error("Video oynatıcı iframe'inin URL'si alınamadı.")
+            return None, None, None
 
-        manifest_url = manifest_match.group(1).replace("\\", "")
-        logger.info(f"Manifest URL'si bulundu: {manifest_url}")
+        driver.header_overrides = {"Referer": target_url}
+
+        logger.info(
+            f"Doğrudan iframe URL'sine 'Referer' başlığı ile gidiliyor: {iframe_url}"
+        )
+        driver.get(iframe_url)
+
+        # --- KESİN VE NİHAİ ÇÖZÜM BURADA ---
+        logger.info(
+            "Reklamın bitmesi ve asıl videonun başlaması için 30 saniye bekleniyor..."
+        )
+        time.sleep(30)  # Reklamın geçmesi için bekleme süresi
+
+        # Tüm ağ trafiğini yakala
+        requests = driver.requests
+
+        # Reklam sunucusu URL'lerini içeren bir liste
+        ad_servers = ["video.twimg.com", "1king-dizibox.pages.dev"]
+
+        manifest_url = None
+        # İstekleri sondan başa doğru kontrol et (asıl video genellikle en son yüklenir)
+        for req in reversed(requests):
+            if ".m3u8" in req.url and not any(
+                server in req.url for server in ad_servers
+            ):
+                manifest_url = req.url
+                logger.info(f"Asıl video manifest'i başarıyla bulundu: {manifest_url}")
+                break
+
+        if not manifest_url:
+            raise TimeoutException("Asıl video manifest'i bulunamadı.")
 
         return manifest_url, {}, []
 
     except TimeoutException:
-        logger.warning(f"Manifest URL'si bulunamadı. URL: {target_url}")
+        logger.warning(
+            f"Manifest URL'si 30 saniye içinde ağ trafiğinde bulunamadı. URL: {target_url}"
+        )
+        return None, None, None
+    except Exception as e:
+        logger.error(
+            f"Manifest URL'si aranırken beklenmedik bir hata oluştu: {e}", exc_info=True
+        )
         return None, None, None
     finally:
         if driver:
             driver.quit()
 
 
+# ... (dosyanın geri kalanını değiştirmeyin, tamamen aynı kalacak) ...
 def download_with_yt_dlp(
     conn,
     item_id,
@@ -121,6 +152,7 @@ def download_with_yt_dlp(
         "--progress",
         "--verbose",
         "--hls-use-mpegts",
+        f"--referer={manifest_url}",
         "-o",
         f"{output_template}.%(ext)s",
     ]
@@ -132,14 +164,15 @@ def download_with_yt_dlp(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="ignore",
         preexec_fn=os.setsid if sys.platform != "win32" else None,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         if sys.platform == "win32"
         else 0,
     )
     full_output = ""
-    for line_bytes in iter(process.stdout.readline, b""):
-        line = line_bytes.decode("utf-8", errors="ignore")
+    for line in iter(process.stdout.readline, ""):
         full_output += line
         progress_match = re.search(r"\[download\]\s+([0-9\.]+)%", line)
         if progress_match:
@@ -188,7 +221,8 @@ def to_ascii_safe(text):
 
 def process_video(item_id, item_type):
     global logger
-    logger = setup_logging()
+    if not logger.handlers:
+        logger = setup_logging()
     conn = None
     cookie_filepath = f"cookies_{item_id}_{item_type}.txt"
     try:
@@ -205,14 +239,18 @@ def process_video(item_id, item_type):
         url_to_fetch = item["url"]
         filename_template = settings.get(
             "SERIES_FILENAME_TEMPLATE",
-            "{series_title}/S{season_number:02d}E{episode_number:02d} - {episode_title}",
+            "{series_title}/Season {season_number:02d}/{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}",
         )
+
         path_string = filename_template.format(
             series_title=to_ascii_safe(item["series_title"]),
             season_number=item["season_number"],
+            season_num=item["season_number"],
             episode_number=item["episode_number"],
+            episode_num=item["episode_number"],
             episode_title=to_ascii_safe(item["title"] or ""),
         )
+
         final_path = os.path.join(base_download_folder, *path_string.split(os.path.sep))
         final_dir = os.path.dirname(final_path)
         safe_filename = os.path.basename(final_path)

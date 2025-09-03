@@ -1,39 +1,27 @@
 # @author: MembaCo.
-# CasaOS için test amaçlı :main etiketi ile güncellenmiş Docker Compose dosyası.
-
 services:
-  algo-video-downloader:
-    # İmaj etiketini :latest yerine :main olarak deniyoruz
+  algo-dizibox-downloader:
+    # Konteyner adını proje ile tutarlı hale getirelim
     image: ghcr.io/membaco/algo-video-downloader:main
-    container_name: algo-video-downloader
+    container_name: algo-dizibox-downloader # Konteyner adını proje ile tutarlı hale getirelim
     ports:
       - 5000:5000
     volumes:
+      # Tüm kalıcı verileri (database, logs vb.) bu tek klasörde toplayalım.
+      # Bu yol, config.py'deki DATA_DIR ile %100 uyumlu olmalı.
       - type: bind
-        source: /DATA/AppData/algo-video-downloader/downloads
-        target: /app/downloads
-      - type: bind
-        source: /DATA/AppData/algo-video-downloader/data
+        source: /DATA/AppData/algo-dizibox-downloader/data
         target: /app/data
+      # İndirilen dosyalar için ayrı bir volume tanımı yapalım.
+      - type: bind
+        source: /DATA/AppData/algo-dizibox-downloader/downloads
+        target: /app/downloads
     environment:
       - SECRET_KEY= # Buraya çok gizli ve rastgele bir anahtar yazın
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD_HASH= # Buraya ürettiğiniz parola hash'ini yapıştırın
+      # DATA_DIR ortam değişkenini de buraya ekleyerek esneklik katabiliriz.
+      - DATA_DIR=/app/data
     restart: unless-stopped
     shm_size: 2g
-    x-casaos:
-      architectures:
-        - amd64
-      main: algo-video-downloader
-      description:
-        en_us: Web tabanlı video indirme yöneticisi.
-      tagline:
-        en_us: Kişisel Video İndirme Yöneticiniz
-      developer: MembaCo
-      author: MembaCo
-      icon: https://www.hdfilmcehennemi.ltd/wp-content/uploads/2023/11/favicon.webp
-      thumbnail: ""
-      title:
-        en_us: Algo Video Downloader
-      category: Utilities
-      port_map: "5000"
+    # ... (x-casaos kısmı aynı kalabilir) ...

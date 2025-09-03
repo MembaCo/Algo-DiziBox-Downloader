@@ -9,9 +9,10 @@ import subprocess
 import sys
 import threading
 from multiprocessing import Process
+import time
 
 from bs4 import BeautifulSoup
-import undetected_chromedriver as uc  # Selenium yerine bu kütüphaneyi kullanıyoruz
+import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -24,37 +25,43 @@ from worker import process_video
 logger = logging.getLogger(__name__)
 
 
-# --- NİHAİ YARDIMCI FONKSİYON ---
 def get_page_source_with_selenium(url):
-    """
-    Tespit edilemeyen chromedriver ile sayfa kaynağını alır.
-    """
     options = uc.ChromeOptions()
-    # options.add_argument("--headless") # Headless mod bu kütüphanenin yeni versiyonlarında daha stabil
-    options.add_argument(f"user-agent={config.USER_AGENT}")
     options.add_argument("--window-size=1280,720")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    # --- EKLENEN SATIR ---
+    options.add_argument("--ignore-certificate-errors")
 
     driver = None
     try:
-        # Standart driver yerine uc.Chrome() kullanıyoruz
-        driver = uc.Chrome(
-            options=options, version_main=108
-        )  # Makinenizdeki Chrome sürümüne göre ayarlayabilirsiniz
-
+        driver = uc.Chrome(options=options)
         driver.get(url)
-        wait = WebDriverWait(driver, 25)  # Bekleme süresini biraz daha artıralım
-
-        logger.info("Ana içerik konteynerinin HTML'de var olması bekleniyor...")
-        wait.until(EC.presence_of_element_located((By.ID, "dizi-puan")))
+        wait = WebDriverWait(driver, 60)
+        logger.info(
+            "Ana içerik konteynerinin (icerikcat) HTML'de var olması bekleniyor..."
+        )
+        wait.until(EC.presence_of_element_located((By.ID, "icerikcat")))
         logger.info("Ana içerik konteyneri başarıyla bulundu. Sayfa kaynağı alınıyor.")
-
         html = driver.page_source
         return html, None
     except TimeoutException:
         error_message = (
-            f"Zaman aşımı: Ana içerik 25 saniye içinde bulunamadı. URL: {url}"
+            f"Zaman aşımı: Ana içerik 60 saniye içinde bulunamadı. URL: {url}"
         )
         logger.error(error_message)
+        if driver:
+            try:
+                html_source = driver.page_source
+                error_filename = "error_page_source.html"
+                with open(error_filename, "w", encoding="utf-8") as f:
+                    f.write(html_source)
+                logger.info(
+                    f"Sayfanın mevcut durumu '{error_filename}' dosyasına kaydedildi."
+                )
+            except Exception as e:
+                logger.error(f"Hata sayfası kaydedilirken bir sorun oluştu: {e}")
         return None, error_message
     except Exception as e:
         error_message = f"Undetected Chromedriver ile sayfa kaynağı alınırken hata: {e}"
@@ -65,8 +72,7 @@ def get_page_source_with_selenium(url):
             driver.quit()
 
 
-# --- DİĞER FONKSİYONLAR ---
-# (Aşağıdaki fonksiyonların geri kalanı öncekiyle aynıdır ve kararlı çalışır)
+# ... (dosyanın geri kalanını değiştirmeyin) ...
 def scrape_series_data(series_url):
     logger.info(f"Dizi verisi çekiliyor (Undetected Chrome ile): {series_url}")
     html_content, error = get_page_source_with_selenium(series_url)
@@ -74,66 +80,80 @@ def scrape_series_data(series_url):
         return None
     try:
         soup = BeautifulSoup(html_content, "html.parser")
-        title_element = soup.select_one("div.dizi-puan-title > h1")
-        poster_element = soup.select_one("div.dizi-puan-img img")
-        description_element = soup.select_one("div.dizi-puan-aciklama")
-        if not all([title_element, poster_element, description_element]):
+
+        og_title = soup.find("meta", property="og:title")
+        title = (
+            og_title["content"].split("İzle")[0].strip()
+            if og_title
+            else "Başlık Bulunamadı"
+        )
+
+        poster_element = soup.select_one("div.category_image img")
+        description_element = soup.select_one("div.category_desc")
+
+        if not all([title, poster_element, description_element]):
             logger.error(
                 f"HTML ayrıştırılırken dizi ana bilgileri bulunamadı. URL: {series_url}"
             )
             return None
+
         series_info = {
-            "title": title_element.text.strip(),
+            "title": title,
             "poster_url": poster_element.get("src"),
             "description": description_element.text.strip(),
             "source_url": series_url,
             "seasons": [],
         }
-        season_tabs = soup.select("ul#dizi-sezon-bolum li a")
-        if not season_tabs:
+
+        season_buttons = soup.select("div#butonlar button.btn")
+        if not season_buttons:
             logger.warning(f"Dizi için sezon bilgisi bulunamadı. URL: {series_url}")
         else:
-            for season_tab in season_tabs:
-                season_text = season_tab.text.strip()
-                season_number_match = re.search(r"(\d+)\.\s*Sezon", season_text)
-                if not season_number_match:
+            season_text = season_buttons[0].text.strip()
+            season_number_match = re.search(r"(\d+)", season_text)
+            season_number = (
+                int(season_number_match.group(1)) if season_number_match else 1
+            )
+
+            season_data = {"season_number": season_number, "episodes": []}
+
+            episode_list = soup.select("div.bolumust")
+            for item in episode_list:
+                link_tag = item.find("a")
+                if not link_tag:
                     continue
-                season_number = int(season_number_match.group(1))
-                season_data = {"season_number": season_number, "episodes": []}
-                season_id = season_tab.get("href").replace("#", "")
-                episode_list = soup.select(f"div#{season_id} ul.bolum-liste li")
-                for item in episode_list:
-                    link_tag = item.find("a")
-                    if not link_tag:
-                        continue
-                    episode_url = link_tag.get("href")
-                    full_title = link_tag.text.strip()
-                    match = re.search(r"(\d+)\.\s*Bölüm\s*-\s*(.*)", full_title)
-                    if match:
-                        episode_number, episode_title = (
-                            int(match.group(1)),
-                            match.group(2).strip(),
-                        )
-                    else:
-                        match_simple = re.search(r"(\d+)\.\s*Bölüm", full_title)
-                        if match_simple:
-                            episode_number, episode_title = (
-                                int(match_simple.group(1)),
-                                f"{int(match_simple.group(1))}. Bölüm",
-                            )
-                        else:
-                            continue
-                    season_data["episodes"].append(
-                        {
-                            "episode_number": episode_number,
-                            "title": episode_title,
-                            "url": episode_url,
-                        }
+
+                episode_url = link_tag.get("href")
+                baslik_div = item.select_one("div.baslik")
+                full_title_text = (
+                    " ".join(baslik_div.text.split()) if baslik_div else ""
+                )
+
+                match = re.search(r"(\d+)\.\s*Sezon\s*(\d+)\.\s*Bölüm", full_title_text)
+                if match:
+                    episode_number = int(match.group(2))
+                    episode_title_raw = baslik_div.select_one("div.bolumismi")
+                    episode_title = (
+                        episode_title_raw.text.strip("()")
+                        if episode_title_raw
+                        else f"{episode_number}. Bölüm"
                     )
-                season_data["episodes"].sort(key=lambda x: x["episode_number"])
-                series_info["seasons"].append(season_data)
+                else:
+                    continue
+
+                season_data["episodes"].append(
+                    {
+                        "episode_number": episode_number,
+                        "title": episode_title,
+                        "url": episode_url,
+                    }
+                )
+
+            season_data["episodes"].sort(key=lambda x: x["episode_number"])
+            series_info["seasons"].append(season_data)
+
         logger.info(
-            f"'{series_info['title']}' dizisi için {len(series_info['seasons'])} sezon bulundu."
+            f"'{series_info['title']}' dizisi için {len(series_info['seasons'])} sezon ve {sum(len(s['episodes']) for s in series_info['seasons'])} bölüm bulundu."
         )
         return series_info
     except Exception as e:
@@ -227,7 +247,7 @@ def start_download(item_id, item_type, active_processes):
         ("Kaynak aranıyor...", pid, item_id),
     )
     db.commit()
-    title = item.get("title", f"Bölüm {item.get('episode_number', '')}")
+    title = item["title"] if item["title"] else f"Bölüm {item['episode_number']}"
     logger.info(f"ID {item_id} ('{title}') için indirme başlatıldı. PID: {pid}")
     return True, f'"{title}" için indirme başlatıldı.'
 
@@ -277,27 +297,28 @@ def delete_record(item_id, item_type, active_processes):
 
 def delete_series_record(series_id, active_processes):
     db = get_db()
-    episodes_to_delete = db.execute(
-        "SELECT e.id, e.pid FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE s.series_id = ?",
-        (series_id,),
-    ).fetchall()
-    for episode in episodes_to_delete:
-        if episode["pid"]:
-            pid = episode["pid"]
-            stop_download(episode["id"], "episode")
-            if pid in active_processes:
-                del active_processes[pid]
     series = db.execute(
         "SELECT title FROM series WHERE id = ?", (series_id,)
     ).fetchone()
-    if series:
-        cursor = db.cursor()
-        cursor.execute("DELETE FROM series WHERE id = ?", (series_id,))
-        db.commit()
-        logger.info(f"'{series['title']}' dizisi ve tüm bölümleri başarıyla silindi.")
-        return True, f"'{series['title']}' dizisi başarıyla silindi."
-    else:
+    if not series:
         return False, "Silinecek dizi bulunamadı."
+
+    episodes_to_stop = db.execute(
+        "SELECT e.id, e.pid FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE s.series_id = ? AND e.pid IS NOT NULL",
+        (series_id,),
+    ).fetchall()
+
+    for episode in episodes_to_stop:
+        pid = episode["pid"]
+        stop_download(episode["id"], "episode")
+        if pid in active_processes:
+            del active_processes[pid]
+
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM series WHERE id = ?", (series_id,))
+    db.commit()
+    logger.info(f"'{series['title']}' dizisi ve tüm bölümleri başarıyla silindi.")
+    return True, f"'{series['title']}' dizisi başarıyla silindi."
 
 
 def start_all_episodes_for_series(series_id):

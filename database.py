@@ -15,6 +15,9 @@ def get_db():
                 config.DATABASE, detect_types=sqlite3.PARSE_DECLTYPES
             )
             g.db.row_factory = sqlite3.Row
+            # --- EKLENEN SATIR ---
+            # Bu komut, 'ON DELETE CASCADE' özelliğinin çalışmasını sağlar.
+            g.db.execute("PRAGMA foreign_keys = ON")
         except sqlite3.Error as e:
             logger.error(f"Veritabanı bağlantısı kurulamadı: {e}", exc_info=True)
             raise e
@@ -30,10 +33,13 @@ def close_db(e=None):
 def setup_database():
     try:
         db = sqlite3.connect(config.DATABASE)
+        # Kurulum sırasında da foreign_keys'i aktif edelim.
+        db.execute("PRAGMA foreign_keys = ON")
         cursor = db.cursor()
         logger.info("Veritabanı tabloları kontrol ediliyor/oluşturuluyor...")
 
-        # --- FİLM TABLOSU ---
+        # --- FİLM TABLOSU (KULLANILMIYOR) ---
+        # Bu tablo artık kullanılmadığı için kaldırılabilir, ancak bir zararı da yoktur.
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS movies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
