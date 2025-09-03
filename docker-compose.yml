@@ -1,0 +1,39 @@
+# @author: MembaCo.
+# CasaOS için test amaçlı :main etiketi ile güncellenmiş Docker Compose dosyası.
+
+services:
+  algo-video-downloader:
+    # İmaj etiketini :latest yerine :main olarak deniyoruz
+    image: ghcr.io/membaco/algo-video-downloader:main
+    container_name: algo-video-downloader
+    ports:
+      - 5000:5000
+    volumes:
+      - type: bind
+        source: /DATA/AppData/algo-video-downloader/downloads
+        target: /app/downloads
+      - type: bind
+        source: /DATA/AppData/algo-video-downloader/data
+        target: /app/data
+    environment:
+      - SECRET_KEY= # Buraya çok gizli ve rastgele bir anahtar yazın
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD_HASH= # Buraya ürettiğiniz parola hash'ini yapıştırın
+    restart: unless-stopped
+    shm_size: 2g
+    x-casaos:
+      architectures:
+        - amd64
+      main: algo-video-downloader
+      description:
+        en_us: Web tabanlı video indirme yöneticisi.
+      tagline:
+        en_us: Kişisel Video İndirme Yöneticiniz
+      developer: MembaCo
+      author: MembaCo
+      icon: https://www.hdfilmcehennemi.ltd/wp-content/uploads/2023/11/favicon.webp
+      thumbnail: ""
+      title:
+        en_us: Algo Video Downloader
+      category: Utilities
+      port_map: "5000"

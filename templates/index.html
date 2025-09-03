@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dizi İndirme Yöneticisi v2.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-sırada {
+            background-color: #312e81;
+            color: #e0e7ff;
+        }
+
+        .status-kaynakaranıyor,
+        .status-indiriliyor {
+            background-color: #78350f;
+            color: #fef3c7;
+        }
+
+        .status-tamamlandı {
+            background-color: #064e3b;
+            color: #d1fae5;
+        }
+
+        .status-hata,
+        .status-duraklatıldı {
+            background-color: #991b1b;
+            color: #fee2e2;
+        }
+
+        .progress-bar-container {
+            background-color: #4b5563;
+            border-radius: 9999px;
+            overflow: hidden;
+            height: 1.25rem;
+        }
+
+        .progress-bar {
+            background-color: #4f46e5;
+            height: 100%;
+            text-align: center;
+            color: white;
+            transition: width 0.3s ease-in-out;
+        }
+
+        .btn {
+            border: none;
+            background-color: transparent;
+            cursor: pointer;
+            padding: 0;
+        }
+
+        .btn-green {
+            color: #22c55e;
+        }
+
+        .btn-green:hover {
+            color: #16a34a;
+        }
+
+        .btn-yellow {
+            color: #eab308;
+        }
+
+        .btn-yellow:hover {
+            color: #ca8a04;
+        }
+
+        .btn-blue {
+            color: #3b82f6;
+        }
+
+        .btn-blue:hover {
+            color: #2563eb;
+        }
+
+        .btn-purple {
+            color: #a855f7;
+        }
+
+        .btn-purple:hover {
+            color: #9333ea;
+        }
+
+        .btn-red {
+            color: #ef4444;
+        }
+
+        .btn-red:hover {
+            color: #dc2626;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 font-sans text-gray-300">
+    <nav class="bg-gray-800 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex justify-between h-16">
+            <div class="flex items-center text-xl font-bold text-gray-200">Dizi İndirme Yöneticisi</div>
+            <div class="flex items-center space-x-4">
+                <a href="{{ url_for('settings') }}"
+                    class="px-3 py-2 rounded-md text-sm font-medium text-gray-300 hover:bg-gray-700">Ayarlar</a>
+                <a href="{{ url_for('logout') }}"
+                    class="px-3 py-2 rounded-md text-sm font-medium text-gray-300 hover:bg-gray-700">Çıkış Yap</a>
+            </div>
+        </div>
+    </nav>
+    <main class="max-w-7xl mx-auto py-8 sm:px-6 lg:px-8">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="mb-6 space-y-2">
+            {% for category, message in messages %}
+            <div class="p-4 rounded-md 
+                {% if category == 'success' %} bg-green-900 border border-green-700 text-green-200
+                {% elif category == 'danger' %} bg-red-900 border border-red-700 text-red-200
+                {% elif category == 'warning' %} bg-yellow-900 border border-yellow-700 text-yellow-200
+                {% else %} bg-indigo-900 border border-indigo-700 text-indigo-200 {% endif %}" role="alert">
+                <p class="font-bold">{{ message }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <div class="bg-gray-800 shadow-lg rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-white mb-4">Yeni Dizi Ekle</h2>
+            <form action="{{ url_for('add_series') }}" method="post" class="flex flex-col sm:flex-row gap-4">
+                <input type="url" name="series_url" placeholder="Dizi ana sayfası linki (dizibox8.com)..."
+                    class="flex-grow shadow-sm block w-full sm:text-sm bg-gray-700 border-gray-600 text-white rounded-md"
+                    required>
+                <button type="submit"
+                    class="inline-flex justify-center items-center px-4 py-2 border-transparent text-base font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700">Diziyi
+                    Ekle</button>
+            </form>
+        </div>
+
+
+        <div class="bg-gray-800 shadow-lg rounded-lg">
+            <div class="px-4 py-5 sm:px-6 border-b border-gray-700 flex justify-between items-center">
+                <h2 class="text-lg font-semibold text-white">İndirme Kuyruğu</h2>
+                <form action="{{ url_for('toggle_auto_download') }}" method="post">
+                    <button type="submit" id="auto-download-btn"
+                        class="px-4 py-2 text-sm font-medium rounded-md"></button>
+                </form>
+            </div>
+
+            <div id="content-series" class="p-4 space-y-4"></div>
+
+        </div>
+        <footer class="text-center text-sm text-gray-500 py-4 mt-4">Sürüm {{ version }}</footer>
+    </main>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            // --- DEĞİŞKENLER VE DURUM YÖNETİMİ ---
+            const accordionState = new Set(); // Açık olan akordiyonların ID'lerini tutar
+
+            // --- AKORDİYON ---
+            window.toggleAccordion = function (elementId) {
+                const element = document.getElementById(elementId);
+                if (!element) return;
+                element.classList.toggle('hidden');
+
+                if (element.classList.contains('hidden')) {
+                    accordionState.delete(elementId);
+                } else {
+                    accordionState.add(elementId);
+                }
+
+                const arrow = document.getElementById(elementId.replace('content', 'arrow'));
+                if (arrow) {
+                    arrow.classList.toggle('rotate-180', !element.classList.contains('hidden'));
+                }
+            };
+
+            // --- ANA GÜNCELLEME MANTIĞI ---
+            function updateUI() {
+                fetch('/status')
+                    .then(response => response.ok ? response.json() : Promise.reject(response))
+                    .then(data => {
+                        // Film kodları kaldırıldı, sadece dizi güncelleniyor.
+                        updateSeries(data.series);
+                        updateAutoDownloadButton(data.auto_download_enabled);
+                    })
+                    .catch(error => {
+                        console.error('Error fetching status:', error);
+                        if (error.status === 401) window.location.reload();
+                    });
+            }
+
+            // --- DİZİ GÜNCELLEME (AKILLI) ---
+            function updateSeries(seriesList) {
+                const seriesContainer = document.getElementById('content-series');
+                const existingSeriesIds = new Set([...seriesContainer.querySelectorAll('[id^="series-block-"]')].map(el => parseInt(el.id.replace('series-block-', ''))));
+                const incomingSeriesIds = new Set(seriesList.map(s => s.id));
+
+                existingSeriesIds.forEach(id => {
+                    if (!incomingSeriesIds.has(id)) {
+                        document.getElementById(`series-block-${id}`)?.remove();
+                    }
+                });
+
+                seriesList.forEach(series => {
+                    let seriesBlock = document.getElementById(`series-block-${series.id}`);
+                    if (!seriesBlock) {
+                        const newSeriesHtml = createSeriesAccordion(series);
+                        seriesContainer.insertAdjacentHTML('beforeend', newSeriesHtml);
+                    } else {
+                        // Akordiyon başlığını (poster, başlık vb.) güncelle
+                        const header = seriesBlock.querySelector('.flex.items-center.p-4');
+                        if (header) {
+                            header.innerHTML = createSeriesAccordionHeader(series);
+                        }
+
+                        // Bölümleri güncelle
+                        series.seasons.forEach(season => {
+                            let seasonBlock = document.getElementById(`season-block-${season.id}`);
+                            if (!seasonBlock) {
+                                // Sezon yoksa ekle
+                                const seriesContent = document.getElementById(`series-content-${series.id}`);
+                                if (seriesContent) {
+                                    seriesContent.insertAdjacentHTML('beforeend', createSeasonAccordion(series.id, season));
+                                }
+                            } else {
+                                const episodeListBody = document.getElementById(`episode-list-${season.id}`);
+                                if (episodeListBody) {
+                                    episodeListBody.innerHTML = season.episodes.map(ep => createEpisodeRow(ep)).join('');
+                                    season.episodes.forEach(ep => updateProgress(`episode-${ep.id}`, ep.status, ep.progress));
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // Sayfa ilk yüklendiğinde veya tüm diziler silindiğinde boş mesajı
+                if (seriesList.length === 0 && seriesContainer.children.length === 0) {
+                    if (!seriesContainer.querySelector('.empty-message')) {
+                        seriesContainer.innerHTML = '<div class="empty-message p-4 text-center text-sm text-gray-500">Henüz dizi eklenmemiş.</div>';
+                    }
+                } else if (seriesList.length > 0) {
+                    const emptyMessage = seriesContainer.querySelector('.empty-message');
+                    if (emptyMessage) emptyMessage.remove();
+                }
+            }
+
+            // --- YARDIMCI FONKSİYONLAR ---
+            function updateAutoDownloadButton(isEnabled) {
+                const autoDownloadBtn = document.getElementById('auto-download-btn');
+                if (isEnabled) {
+                    autoDownloadBtn.textContent = 'Otomatik İndirmeyi Durdur';
+                    autoDownloadBtn.className = 'px-4 py-2 text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700';
+                } else {
+                    autoDownloadBtn.textContent = 'Otomatik İndirmeyi Başlat';
+                    autoDownloadBtn.className = 'px-4 py-2 text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700';
+                }
+            }
+
+            function updateProgress(idPrefix, status, progressValue) {
+                const progressContainer = document.getElementById(`progress-container-${idPrefix}`);
+                if (!progressContainer) return;
+
+                const isWorking = ['Kaynak aranıyor...', 'İndiriliyor'].includes(status);
+                const isDone = status === 'Tamamlandı';
+
+                if (isWorking || (isDone && progressValue === 100)) {
+                    progressContainer.style.display = 'block';
+                    const progress = Math.floor(progressValue || 0);
+                    document.getElementById(`progress-bar-${idPrefix}`).style.width = `${progress}%`;
+                    document.getElementById(`progress-text-${idPrefix}`).textContent = `${progress}%`;
+                } else {
+                    progressContainer.style.display = 'none';
+                }
+            }
+
+            // --- HTML OLUŞTURMA FONKSİYONLARI (DETAY) ---
+            function createSeriesAccordionHeader(series) {
+                const isSeriesOpen = accordionState.has(`series-content-${series.id}`);
+                return `
+                    <div class="flex-grow flex items-center cursor-pointer" onclick="toggleAccordion('series-content-${series.id}')">
+                        <img src="${series.poster_url || 'https://placehold.co/100x150/1f2937/9ca3af?text=Poster+Yok'}" alt="Dizi Posteri" class="w-16 h-24 object-cover rounded shadow-lg mr-4">
+                        <div class="flex-grow">
+                            <h3 class="text-lg font-bold text-purple-400">${series.title}</h3>
+                            <p class="text-xs text-gray-400 max-h-16 overflow-auto">${series.description}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-4 ml-4 mr-2">
+                        <form action="/series/start/${series.id}" method="post">
+                            <button type="submit" class="btn btn-green font-semibold">Tümünü İndir</button>
+                        </form>
+                        <form action="/series/delete/${series.id}" method="post" onsubmit="return confirm('Bu diziyi ve tüm bölümlerini kalıcı olarak silmek istediğinizden emin misiniz?');">
+                            <button type="submit" class="btn btn-red font-semibold">Sil</button>
+                        </form>
+                    </div>
+                    <div class="cursor-pointer p-2" onclick="toggleAccordion('series-content-${series.id}')">
+                        <svg class="w-6 h-6 transform transition-transform ${isSeriesOpen ? 'rotate-180' : ''}" id="series-arrow-${series.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                `;
+            }
+
+            function createSeriesAccordion(series) {
+                let seasonsHtml = series.seasons.map(season => createSeasonAccordion(series.id, season)).join('');
+                if (series.seasons.length === 0) seasonsHtml = `<div class="p-4 text-sm text-gray-400">Bu dizi için bölüm bulunamadı.</div>`;
+                const isSeriesOpen = accordionState.has(`series-content-${series.id}`);
+                return `
+                    <div class="bg-gray-700 rounded-lg" id="series-block-${series.id}">
+                        <div class="flex items-center p-4">
+                           ${createSeriesAccordionHeader(series)}
+                        </div>
+                        <div id="series-content-${series.id}" class="${isSeriesOpen ? '' : 'hidden'} p-2 sm:p-4 border-t border-gray-600 space-y-2">${seasonsHtml}</div>
+                    </div>
+                `;
+            }
+
+            function createSeasonAccordion(seriesId, season) {
+                const episodesHtml = season.episodes.map(ep => createEpisodeRow(ep)).join('');
+                const isSeasonOpen = accordionState.has(`season-content-${season.id}`);
+                return `
+                    <div class="bg-gray-800 rounded" id="season-block-${season.id}">
+                        <div class="px-4 py-2 cursor-pointer font-semibold flex justify-between items-center" onclick="toggleAccordion('season-content-${season.id}')">
+                            <span>Sezon ${season.season_number}</span>
+                            <svg class="w-5 h-5 transform transition-transform ${isSeasonOpen ? 'rotate-180' : ''}" id="season-arrow-${season.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </div>
+                        <div id="season-content-${season.id}" class="${isSeasonOpen ? '' : 'hidden'}"><table class="min-w-full"><tbody id="episode-list-${season.id}">${episodesHtml}</tbody></table></div>
+                    </div>
+                `;
+            }
+
+            function createEpisodeRow(episode) {
+                const statusSimple = (episode.status || '').split(':')[0].toLowerCase().replace(/[^a-z0-9]/gi, '');
+                return `
+                    <tr id="episode-row-${episode.id}" class="border-t border-gray-700">
+                        <td class="px-3 py-2 text-sm w-1/12">${episode.episode_number}</td>
+                        <td class="px-3 py-2 text-sm w-5/12">${episode.title}</td>
+                        <td class="px-3 py-2 text-sm w-3/12">
+                            <span id="status-text-episode-${episode.id}" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full status-${statusSimple}">${episode.status}</span>
+                            <div id="progress-container-episode-${episode.id}" class="mt-1 w-full progress-bar-container" style="display: none;">
+                                <div id="progress-bar-episode-${episode.id}" class="progress-bar text-xs" style="width: 0%;"><span id="progress-text-episode-${episode.id}">0%</span></div>
+                            </div>
+                        </td>
+                        <td class="px-3 py-2 text-sm w-3/12"><div id="actions-episode-${episode.id}" class="flex items-center space-x-3">${createActionsHtml(episode, 'episode')}</div></td>
+                    </tr>
+                `;
+            }
+
+            function createActionsHtml(item, type) {
+                let html = '';
+                const id = item.id;
+                const status = item.status;
+                const isWorking = ['Kaynak aranıyor...', 'İndiriliyor'].includes(status);
+
+                if (isWorking) {
+                    html += `<form action="/${type}/stop/${id}" method="post"><button type="submit" class="btn btn-yellow font-semibold">Durdur</button></form>`;
+                } else if (status === 'Tamamlandı') {
+                    html += `<form action="/${type}/start/${id}" method="post"><button type="submit" class="btn btn-blue font-semibold">Yeniden</button></form>`;
+                    if (item.filepath) {
+                        html += `<form action="/${type}/delete_file/${id}" method="post" onsubmit="return confirm('Bu dosyayı diskten kalıcı olarak silmek istediğinizden emin misiniz?');"><button type="submit" class="btn btn-purple font-semibold">Disk'ten Sil</button></form>`;
+                    }
+                } else {
+                    html += `<form action="/${type}/start/${id}" method="post"><button type="submit" class="btn btn-green font-semibold">Başlat</button></form>`;
+                }
+                html += `<form action="/${type}/delete/${id}" method="post" onsubmit="return confirm('Bu kaydı silmek istediğinizden emin misiniz?');"><button type="submit" class="btn btn-red font-semibold">Sil</button></form>`;
+                return html;
+            }
+
+            // --- BAŞLANGIÇ ---
+            setInterval(updateUI, 3000);
+            updateUI();
+        });
+    </script>
+</body>
+
+</html>
