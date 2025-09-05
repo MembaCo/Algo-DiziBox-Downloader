@@ -54,7 +54,7 @@ def _update_status_worker(
 
 def find_manifest_url(target_url, user_data_dir):
     """
-    Manifest URL'sini bulur. Tarayıcıyı başlatırken belirtilen profil dizinini kullanır.
+    Manifest URL'sini ve isteğin başlık (header) bilgilerini bulur.
     """
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
@@ -89,7 +89,7 @@ def find_manifest_url(target_url, user_data_dir):
 
         if not iframe_url:
             logger.error("Video oynatıcı iframe'inin URL'si alınamadı.")
-            return None
+            return None, None
 
         driver.header_overrides = {"Referer": target_url}
         driver.get(iframe_url)
@@ -118,6 +118,7 @@ def find_manifest_url(target_url, user_data_dir):
         requests = driver.requests
         ad_servers = ["video.twimg.com", "1king-dizibox.pages.dev"]
         manifest_url = None
+        request_headers = {}
         manifest_keywords = [".m3u8", "master.txt"]
 
         for req in reversed(requests):
@@ -125,6 +126,10 @@ def find_manifest_url(target_url, user_data_dir):
                 server in req.url for server in ad_servers
             ):
                 manifest_url = req.url
+                if "User-Agent" in req.headers:
+                    request_headers["User-Agent"] = req.headers["User-Agent"]
+                if "Cookie" in req.headers:
+                    request_headers["Cookie"] = req.headers["Cookie"]
                 logger.info(
                     f"Asıl video manifest/playlist'i başarıyla bulundu: {manifest_url}"
                 )
@@ -133,18 +138,18 @@ def find_manifest_url(target_url, user_data_dir):
         if not manifest_url:
             raise TimeoutException("Asıl video manifest'i bulunamadı.")
 
-        return manifest_url
+        return manifest_url, request_headers
 
     except TimeoutException:
         logger.warning(
             f"Manifest URL'si 30 saniye içinde ağ trafiğinde bulunamadı. URL: {target_url}"
         )
-        return None
+        return None, None
     except Exception as e:
         logger.error(
             f"Manifest URL'si aranırken beklenmedik bir hata oluştu: {e}", exc_info=True
         )
-        return None
+        return None, None
     finally:
         if driver:
             try:
@@ -158,7 +163,7 @@ def download_with_yt_dlp(
     item_id,
     item_type,
     manifest_url,
-    user_data_dir,
+    headers,
     output_template,
     speed_limit,
 ):
@@ -181,11 +186,10 @@ def download_with_yt_dlp(
     if speed_limit:
         command.extend(["--limit-rate", speed_limit])
 
-    if user_data_dir:
-        logger.info(f"yt-dlp için tarayıcı profili kullanılıyor: {user_data_dir}")
-        command.extend(
-            ["--cookies-from-browser", "chrome", "--user-data-dir", user_data_dir]
-        )
+    if headers:
+        logger.info(f"yt-dlp için özel header'lar kullanılıyor.")
+        for key, value in headers.items():
+            command.extend(["--add-header", f"{key}: {value}"])
 
     command.append(manifest_url)
 
@@ -295,7 +299,7 @@ def process_video(item_id, item_type):
 
         _update_status_worker(conn, item_id, item_type, status="Kaynak aranıyor...")
 
-        manifest_url = find_manifest_url(url_to_fetch, profile_dir)
+        manifest_url, headers = find_manifest_url(url_to_fetch, profile_dir)
 
         if manifest_url:
             _update_status_worker(conn, item_id, item_type, status="İndiriliyor")
@@ -304,7 +308,7 @@ def process_video(item_id, item_type):
                 item_id,
                 item_type,
                 manifest_url,
-                profile_dir,
+                headers,
                 output_template,
                 settings.get("SPEED_LIMIT"),
             )
