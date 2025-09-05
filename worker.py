@@ -183,11 +183,9 @@ def download_with_yt_dlp(
 
     if user_data_dir:
         logger.info(f"yt-dlp için tarayıcı profili kullanılıyor: {user_data_dir}")
-        # --- GÜNCELLEME: --user-data-dir ve yolu ayrı argümanlar olarak ekle ---
         command.extend(
             ["--cookies-from-browser", "chrome", "--user-data-dir", user_data_dir]
         )
-        # --- GÜNCELLEME SONU ---
 
     command.append(manifest_url)
 
