@@ -15,8 +15,6 @@ def get_db():
                 config.DATABASE, detect_types=sqlite3.PARSE_DECLTYPES
             )
             g.db.row_factory = sqlite3.Row
-            # --- EKLENEN SATIR ---
-            # Bu komut, 'ON DELETE CASCADE' özelliğinin çalışmasını sağlar.
             g.db.execute("PRAGMA foreign_keys = ON")
         except sqlite3.Error as e:
             logger.error(f"Veritabanı bağlantısı kurulamadı: {e}", exc_info=True)
@@ -33,27 +31,9 @@ def close_db(e=None):
 def setup_database():
     try:
         db = sqlite3.connect(config.DATABASE)
-        # Kurulum sırasında da foreign_keys'i aktif edelim.
         db.execute("PRAGMA foreign_keys = ON")
         cursor = db.cursor()
         logger.info("Veritabanı tabloları kontrol ediliyor/oluşturuluyor...")
-
-        # --- FİLM TABLOSU (KULLANILMIYOR) ---
-        # Bu tablo artık kullanılmadığı için kaldırılabilir, ancak bir zararı da yoktur.
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS movies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'Sırada',
-            title TEXT, year TEXT, genre TEXT, description TEXT,
-            imdb_score TEXT, director TEXT, cast TEXT, poster_url TEXT,
-            source_site TEXT, source_url TEXT,
-            progress REAL DEFAULT 0.0,
-            filepath TEXT,
-            pid INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
 
         # --- DİZİ TABLOLARI ---
         cursor.execute("""
@@ -111,7 +91,6 @@ def init_settings():
     """Varsayılan ayarları veritabanına yazar (eğer mevcut değillerse)."""
     defaults = {
         "DOWNLOADS_FOLDER": "downloads",
-        "FILENAME_TEMPLATE": "{title} - {year}",
         "SERIES_FILENAME_TEMPLATE": "{series_title}/Season {season_number:02d}/{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}",
         "CONCURRENT_DOWNLOADS": "1",
         "SPEED_LIMIT": "",

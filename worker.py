@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import glob
+import shutil
 from seleniumwire import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -51,22 +52,28 @@ def _update_status_worker(
         )
 
 
-def find_manifest_url(target_url):
+def find_manifest_url(target_url, user_data_dir):
     """
-    Reklam videosunu filtreleyerek asıl içeriğin manifest URL'sini yakalar.
+    Manifest URL'sini bulur. Tarayıcıyı başlatırken belirtilen profil dizinini kullanır.
     """
     options = uc.ChromeOptions()
-    # options.add_argument("--headless")
     options.add_argument("--window-size=1280,720")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--mute-audio")  # Tarayıcı sesini kapatır
+    options.add_argument("--mute-audio")
+    options.add_argument(f"user-agent={config.USER_AGENT}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
     driver = None
     try:
-        driver = uc.Chrome(options=options)
+        logger.info(f"Belirtilen tarayıcı profili kullanılıyor: {user_data_dir}")
+        driver = uc.Chrome(user_data_dir=user_data_dir, options=options)
+
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
 
         logger.info(f"Ana bölüm sayfasına gidiliyor: {target_url}")
         driver.get(target_url)
@@ -82,68 +89,80 @@ def find_manifest_url(target_url):
 
         if not iframe_url:
             logger.error("Video oynatıcı iframe'inin URL'si alınamadı.")
-            return None, None, None
+            return None
 
         driver.header_overrides = {"Referer": target_url}
-
-        logger.info(
-            f"Doğrudan iframe URL'sine 'Referer' başlığı ile gidiliyor: {iframe_url}"
-        )
         driver.get(iframe_url)
 
-        # --- KESİN VE NİHAİ ÇÖZÜM BURADA ---
         logger.info(
-            "Reklamın bitmesi ve asıl videonun başlaması için 30 saniye bekleniyor..."
+            "Reklam engelleyici ekranının yüklenmesi için 5 saniye bekleniyor..."
         )
-        time.sleep(30)  # Reklamın geçmesi için bekleme süresi
+        time.sleep(5)
 
-        # Tüm ağ trafiğini yakala
+        try:
+            driver.execute_script("""
+                var deblockerWrapper = document.querySelector('.deblocker-wrapper');
+                var deblockerBlackout = document.querySelector('.deblocker-blackout');
+                if (deblockerWrapper) { deblockerWrapper.remove(); }
+                if (deblockerBlackout) { deblockerBlackout.remove(); }
+            """)
+            logger.info("Deblocker ekranı başarıyla kaldırıldı.")
+        except Exception as js_error:
+            logger.warning(f"Deblocker ekranı kaldırılırken hata oluştu: {js_error}")
+
+        logger.info(
+            "Reklamın bitmesi ve asıl videonun başlaması için 25 saniye bekleniyor..."
+        )
+        time.sleep(25)
+
         requests = driver.requests
-
-        # Reklam sunucusu URL'lerini içeren bir liste
         ad_servers = ["video.twimg.com", "1king-dizibox.pages.dev"]
-
         manifest_url = None
-        # İstekleri sondan başa doğru kontrol et (asıl video genellikle en son yüklenir)
+        manifest_keywords = [".m3u8", "master.txt"]
+
         for req in reversed(requests):
-            if ".m3u8" in req.url and not any(
+            if any(keyword in req.url for keyword in manifest_keywords) and not any(
                 server in req.url for server in ad_servers
             ):
                 manifest_url = req.url
-                logger.info(f"Asıl video manifest'i başarıyla bulundu: {manifest_url}")
+                logger.info(
+                    f"Asıl video manifest/playlist'i başarıyla bulundu: {manifest_url}"
+                )
                 break
 
         if not manifest_url:
             raise TimeoutException("Asıl video manifest'i bulunamadı.")
 
-        return manifest_url, {}, []
+        return manifest_url
 
     except TimeoutException:
         logger.warning(
             f"Manifest URL'si 30 saniye içinde ağ trafiğinde bulunamadı. URL: {target_url}"
         )
-        return None, None, None
+        return None
     except Exception as e:
         logger.error(
             f"Manifest URL'si aranırken beklenmedik bir hata oluştu: {e}", exc_info=True
         )
-        return None, None, None
+        return None
     finally:
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except OSError as e:
+                logger.warning(f"Driver kapatılırken beklenen bir hata oluştu: {e}")
 
 
-# ... (dosyanın geri kalanını değiştirmeyin, tamamen aynı kalacak) ...
 def download_with_yt_dlp(
     conn,
     item_id,
     item_type,
     manifest_url,
-    headers,
-    cookie_filepath,
+    user_data_dir,
     output_template,
     speed_limit,
 ):
+    final_output_template = f"{output_template}.mp4"
     command = [
         "yt-dlp",
         "--newline",
@@ -152,12 +171,24 @@ def download_with_yt_dlp(
         "--progress",
         "--verbose",
         "--hls-use-mpegts",
+        "--merge-output-format",
+        "mp4",
         f"--referer={manifest_url}",
         "-o",
-        f"{output_template}.%(ext)s",
+        final_output_template,
     ]
+
     if speed_limit:
         command.extend(["--limit-rate", speed_limit])
+
+    if user_data_dir:
+        logger.info(f"yt-dlp için tarayıcı profili kullanılıyor: {user_data_dir}")
+        # --- GÜNCELLEME: --user-data-dir ve yolu ayrı argümanlar olarak ekle ---
+        command.extend(
+            ["--cookies-from-browser", "chrome", "--user-data-dir", user_data_dir]
+        )
+        # --- GÜNCELLEME SONU ---
+
     command.append(manifest_url)
 
     process = subprocess.Popen(
@@ -224,8 +255,15 @@ def process_video(item_id, item_type):
     if not logger.handlers:
         logger = setup_logging()
     conn = None
-    cookie_filepath = f"cookies_{item_id}_{item_type}.txt"
+    profile_dir = None
     try:
+        profile_dir = os.path.abspath(
+            os.path.join("chrome_profiles", f"user_{item_id}")
+        )
+        if os.path.exists(profile_dir):
+            shutil.rmtree(profile_dir)
+        os.makedirs(profile_dir, exist_ok=True)
+
         conn = sqlite3.connect(config.DATABASE)
         conn.row_factory = sqlite3.Row
         settings = get_all_settings_from_db(conn)
@@ -258,7 +296,8 @@ def process_video(item_id, item_type):
         output_template = os.path.join(final_dir, safe_filename)
 
         _update_status_worker(conn, item_id, item_type, status="Kaynak aranıyor...")
-        manifest_url, headers, cookies = find_manifest_url(url_to_fetch)
+
+        manifest_url = find_manifest_url(url_to_fetch, profile_dir)
 
         if manifest_url:
             _update_status_worker(conn, item_id, item_type, status="İndiriliyor")
@@ -267,15 +306,13 @@ def process_video(item_id, item_type):
                 item_id,
                 item_type,
                 manifest_url,
-                headers,
-                cookie_filepath,
+                profile_dir,
                 output_template,
                 settings.get("SPEED_LIMIT"),
             )
             if success:
-                files = glob.glob(f"{output_template}.*")
-                if files:
-                    final_filepath = files[0]
+                final_filepath = f"{output_template}.mp4"
+                if os.path.exists(final_filepath):
                     _update_status_worker(
                         conn,
                         item_id,
@@ -313,5 +350,9 @@ def process_video(item_id, item_type):
     finally:
         if conn:
             conn.close()
-        if os.path.exists(cookie_filepath):
-            os.remove(cookie_filepath)
+        if profile_dir and os.path.exists(profile_dir):
+            try:
+                shutil.rmtree(profile_dir)
+                logger.info(f"Geçici profil '{profile_dir}' başarıyla silindi.")
+            except Exception as e:
+                logger.error(f"Geçici profil '{profile_dir}' silinirken hata: {e}")

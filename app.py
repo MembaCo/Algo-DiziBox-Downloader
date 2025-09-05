@@ -125,61 +125,6 @@ def index():
     return render_template("index.html", version=config.VERSION)
 
 
-# --- FİLM ROTALARI ---
-@app.route("/add_movie", methods=["POST"])
-def add_movie():
-    url = request.form["url"]
-    if config.ALLOWED_DOMAIN not in url:
-        flash(f"Lütfen geçerli bir {config.ALLOWED_DOMAIN} linki girin.", "warning")
-        return redirect(url_for("index"))
-    success, message = services.add_movie_to_queue(url)
-    flash(message, "success" if success else "danger")
-    return redirect(url_for("index"))
-
-
-@app.route("/add_list", methods=["POST"])
-def add_list():
-    list_url = request.form["list_url"]
-    if config.ALLOWED_DOMAIN not in list_url:
-        flash(f"Lütfen geçerli bir {config.ALLOWED_DOMAIN} linki girin.", "warning")
-        return redirect(url_for("index"))
-    thread = threading.Thread(
-        target=services.add_movies_from_list_page_async, args=(app, list_url)
-    )
-    thread.daemon = True
-    thread.start()
-    flash("Toplu ekleme işlemi arka planda başlatıldı...", "info")
-    return redirect(url_for("index"))
-
-
-@app.route("/movie/start/<int:movie_id>", methods=["POST"])
-def start_movie_download(movie_id):
-    success, message = services.start_download(movie_id, "movie", active_processes)
-    flash(message, "info" if success else "warning")
-    return redirect(url_for("index"))
-
-
-@app.route("/movie/stop/<int:movie_id>", methods=["POST"])
-def stop_movie_download(movie_id):
-    success, message = services.stop_download(movie_id, "movie")
-    flash(message, "info" if success else "danger")
-    return redirect(url_for("index"))
-
-
-@app.route("/movie/delete/<int:movie_id>", methods=["POST"])
-def delete_movie(movie_id):
-    services.delete_record(movie_id, "movie", active_processes)
-    flash("Film kaydı başarıyla silindi.", "success")
-    return redirect(url_for("index"))
-
-
-@app.route("/movie/delete_file/<int:movie_id>", methods=["POST"])
-def delete_movie_file(movie_id):
-    success, message = services.delete_item_file(movie_id, "movie")
-    flash(message, "success" if success else "danger")
-    return redirect(url_for("index"))
-
-
 # --- DİZİ ROTALARI ---
 @app.route("/add_series", methods=["POST"])
 def add_series():
@@ -212,11 +157,7 @@ def delete_series(series_id):
 def start_series_download(series_id):
     success, message = services.start_all_episodes_for_series(series_id)
 
-    # Eğer bölümler başarıyla sıraya eklendiyse...
     if success:
-        # Otomatik indirme yöneticisi çalışmıyor olsa bile,
-        # kuyruğu bir kez kontrol etmesi için döngüyü manuel olarak tetikleyelim.
-        # Bu, anında bir indirme başlatılmasını sağlar.
         try:
             logger.info(f"Kuyruğa ekleme sonrası indirme döngüsü tetikleniyor...")
             services.run_auto_download_cycle(active_processes)
@@ -229,28 +170,28 @@ def start_series_download(series_id):
 
 @app.route("/episode/start/<int:episode_id>", methods=["POST"])
 def start_episode_download(episode_id):
-    success, message = services.start_download(episode_id, "episode", active_processes)
+    success, message = services.start_download(episode_id, active_processes)
     flash(message, "info" if success else "warning")
     return redirect(url_for("index"))
 
 
 @app.route("/episode/stop/<int:episode_id>", methods=["POST"])
 def stop_episode_download(episode_id):
-    success, message = services.stop_download(episode_id, "episode")
+    success, message = services.stop_download(episode_id)
     flash(message, "info" if success else "danger")
     return redirect(url_for("index"))
 
 
 @app.route("/episode/delete/<int:episode_id>", methods=["POST"])
 def delete_episode(episode_id):
-    services.delete_record(episode_id, "episode", active_processes)
+    services.delete_record(episode_id, active_processes)
     flash("Bölüm kaydı başarıyla silindi.", "success")
     return redirect(url_for("index"))
 
 
 @app.route("/episode/delete_file/<int:episode_id>", methods=["POST"])
 def delete_episode_file(episode_id):
-    success, message = services.delete_item_file(episode_id, "episode")
+    success, message = services.delete_item_file(episode_id)
     flash(message, "success" if success else "danger")
     return redirect(url_for("index"))
 
@@ -261,7 +202,6 @@ def settings():
     if request.method == "POST":
         settings_updated = False
         update_setting("DOWNLOADS_FOLDER", request.form["downloads_folder"], db)
-        update_setting("FILENAME_TEMPLATE", request.form["filename_template"], db)
         update_setting(
             "SERIES_FILENAME_TEMPLATE", request.form["series_filename_template"], db
         )
@@ -304,7 +244,7 @@ def toggle_auto_download():
     if is_enabled:
         auto_download_manager_state["enabled"] = False
         if auto_download_manager_state["thread"]:
-            auto_download_manager_state["thread"].join()  # Thread'in bitmesini bekle
+            auto_download_manager_state["thread"].join()
         flash("Otomatik indirme pasif hale getirildi.", "info")
         logger.info("Otomatik indirme durumu: PASİF")
     else:
@@ -322,12 +262,10 @@ def status_api():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
 
-    movies_data = services.get_all_movies_status()
     series_data = services.get_all_series_status()
 
     return jsonify(
         {
-            "movies": movies_data,
             "series": series_data,
             "auto_download_enabled": auto_download_manager_state["enabled"],
         }
