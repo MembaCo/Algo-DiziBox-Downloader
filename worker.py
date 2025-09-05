@@ -9,6 +9,12 @@ import sys
 import logging
 import glob
 import shutil
+import base64
+from hashlib import md5
+
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+
 from seleniumwire import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -22,19 +28,47 @@ from database import get_all_settings as get_all_settings_from_db
 logger = logging.getLogger(__name__)
 
 
+# --- ŞİFRE ÇÖZME FONKSİYONLARI (dizibox.py'dan adapte edildi) ---
+def bytes_to_key(data, salt, output=48):
+    data += salt
+    key = md5(data).digest()
+    final_key = key
+    while len(final_key) < output:
+        key = md5(key + data).digest()
+        final_key += key
+    return final_key[:output]
+
+
+def decrypt_aes(encrypted_data, password):
+    """AES şifreli veriyi çözer."""
+    try:
+        encrypted_data_bytes = base64.b64decode(encrypted_data)
+        salt = encrypted_data_bytes[8:16]
+        ciphertext = encrypted_data_bytes[16:]
+        key_iv = bytes_to_key(password.encode(), salt, 48)
+        key = key_iv[:32]
+        iv = key_iv[32:]
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted_padded = cipher.decrypt(ciphertext)
+        return unpad(decrypted_padded, AES.block_size).decode()
+    except Exception as e:
+        logger.error(f"AES şifresi çözülürken hata: {e}")
+        return None
+
+
+# --- ŞİFRE ÇÖZME SONU ---
+
+
 def _update_status_worker(
-    conn, item_id, item_type, status=None, source_url=None, progress=None, filepath=None
+    conn, item_id, item_type, status=None, progress=None, filepath=None
 ):
+    """Veritabanındaki indirme durumunu günceller."""
     table = "episodes"
     try:
         cursor = conn.cursor()
         if status:
             cursor.execute(
                 f"UPDATE {table} SET status = ? WHERE id = ?", (status, item_id)
-            )
-        if source_url:
-            cursor.execute(
-                f"UPDATE {table} SET source_url = ? WHERE id = ?", (source_url, item_id)
             )
         if progress is not None:
             cursor.execute(
@@ -46,400 +80,140 @@ def _update_status_worker(
             )
         conn.commit()
     except sqlite3.Error as e:
-        logger.error(
-            f"ID {item_id} ({item_type}) için worker DB güncellemesinde hata: {e}",
-            exc_info=True,
-        )
+        logger.error(f"ID {item_id} için DB güncellemesinde hata: {e}", exc_info=True)
 
 
-def find_manifest_url(target_url, user_data_dir):
-    """
-    Manifest URL'sini ve isteğin başlık (header) bilgilerini bulur.
-    Dinamik video linkler için gelişmiş yaklaşım.
-    """
+def find_video_source(target_url, user_data_dir):
+    """Selenium ile iframe zincirini takip ederek video kaynağını ve şifresini bulur."""
     options = uc.ChromeOptions()
-
-    # Sadece temel seçenekler
     options.add_argument("--window-size=1280,720")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--mute-audio")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
     options.add_argument(f"--user-agent={config.USER_AGENT}")
 
     driver = None
     try:
-        logger.info(f"Chrome başlatılıyor, profil dizini: {user_data_dir}")
+        logger.info(f"Chrome başlatılıyor...")
         driver = uc.Chrome(user_data_dir=user_data_dir, options=options)
-        driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
 
+        # 1. Adım: Ana dizi sayfasına git
         logger.info(f"Ana sayfa yükleniyor: {target_url}")
         driver.get(target_url)
-
-        # Sayfanın tam yüklenmesini bekle
-        time.sleep(5)
-
-        # Video iframe'i bekle - daha esnek selector
         wait = WebDriverWait(driver, 30)
-        logger.info("Video iframe aranıyor...")
 
-        # Birden fazla selector dene
-        iframe_selectors = [
-            "div.video-container iframe",
-            "iframe[src*='stream']",
-            "iframe[src*='video']",
-            ".video-player iframe",
-            "#video-container iframe",
-            "iframe",
-        ]
+        # 2. Adım: İlk iframe'i bul ve URL'sini al (örneğin king.php)
+        logger.info("İlk video iframe'i aranıyor...")
+        iframe1 = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "iframe[src*='king.php'], iframe[src*='stream']")
+            )
+        )
+        iframe1_url = iframe1.get_attribute("src")
 
-        iframe_element = None
-        for selector in iframe_selectors:
-            try:
-                iframe_element = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+        # 3. Adım: İlk iframe'in sayfasına git
+        logger.info(f"İlk iframe'e gidiliyor: {iframe1_url}")
+        driver.get(iframe1_url)
+
+        # 4. Adım: İkinci iframe'i bul (molystream/cehennemstream)
+        logger.info("İkinci video iframe'i aranıyor...")
+        iframe2 = wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.CSS_SELECTOR,
+                    "iframe[src*='molystream'], iframe[src*='cehennemstream']",
                 )
-                logger.info(f"Iframe bulundu: {selector}")
-                break
-            except TimeoutException:
-                continue
+            )
+        )
+        iframe2_url = iframe2.get_attribute("src")
 
-        if not iframe_element:
-            logger.error("Hiçbir video iframe bulunamadı")
-            return None, None
+        # 5. Adım: İkinci ve son iframe'in sayfasına git
+        logger.info(f"Son video iframe'ine gidiliyor: {iframe2_url}")
+        driver.get(iframe2_url)
 
-        iframe_url = iframe_element.get_attribute("src")
-        if not iframe_url:
-            logger.error("Video iframe URL'si alınamadı")
-            return None, None
-
-        logger.info(f"Video iframe'e geçiliyor: {iframe_url}")
-
-        # Referrer header'ını ayarla
-        driver.execute_cdp_cmd(
-            "Network.setUserAgentOverride",
-            {
-                "userAgent": config.USER_AGENT,
-                "acceptLanguage": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-                "platform": "Win32",
-            },
+        # 6. Adım: Şifreleme verisini ara
+        logger.info("Şifreleme verisi aranıyor...")
+        time.sleep(5)  # Sayfanın tam yüklenmesi için kısa bir bekleme
+        page_source = driver.page_source
+        match = re.search(
+            r'CryptoJS\.AES\.decrypt\("([^"]+)",\s*"([^"]+)"\)', page_source, re.DOTALL
         )
 
-        # Iframe'e git
-        driver.get(iframe_url)
-
-        # Sayfa yüklensin ve video player hazırlansın
-        logger.info("Video player yüklenmesi bekleniyor...")
-        time.sleep(10)
-
-        # Video player'ın yüklenmesini bekle
-        player_wait_script = """
-            return new Promise((resolve) => {
-                let attempts = 0;
-                const checkPlayer = () => {
-                    attempts++;
-                    const videos = document.querySelectorAll('video');
-                    const players = document.querySelectorAll('[id*="player"], [class*="player"], [class*="video"]');
-                    
-                    if (videos.length > 0 || players.length > 0 || attempts > 20) {
-                        resolve(true);
-                    } else {
-                        setTimeout(checkPlayer, 500);
-                    }
-                };
-                checkPlayer();
-            });
-        """
-
-        try:
-            driver.execute_async_script(player_wait_script)
-            logger.info("Video player hazır")
-        except:
-            logger.info("Player bekleme timeout - devam ediliyor")
-
-        # Overlay'leri temizle ve videoyu başlat
-        start_video_script = """
-            // Overlay'leri kaldır
-            document.querySelectorAll('.deblocker-wrapper, .deblocker-blackout, .overlay, .ad-overlay, .modal, .popup').forEach(el => {
-                try { el.style.display = 'none'; } catch(e) {}
-            });
-            
-            // Video elementlerini bul
-            const videos = document.querySelectorAll('video');
-            let videoStarted = false;
-            
-            videos.forEach(video => {
-                try {
-                    video.muted = true;
-                    video.autoplay = true;
-                    video.play().then(() => {
-                        console.log('Video started successfully');
-                        videoStarted = true;
-                    }).catch(e => console.log('Video play error:', e));
-                } catch(e) {
-                    console.log('Video manipulation error:', e);
-                }
-            });
-            
-            // Play butonlarını bul ve tıkla
-            const playSelectors = [
-                '.play-button', '.vjs-play-button', '.plyr__control--overlaid', 
-                '.jw-display-icon-display', 'button[aria-label*="Play"]',
-                'button[title*="Play"]', '.video-play-button', 
-                '[class*="play"]', '[id*="play"]'
-            ];
-            
-            playSelectors.forEach(selector => {
-                document.querySelectorAll(selector).forEach(btn => {
-                    try { 
-                        btn.click(); 
-                        console.log('Clicked play button:', selector);
-                    } catch(e) {}
-                });
-            });
-            
-            return { videoElements: videos.length, videoStarted: videoStarted };
-        """
-
-        try:
-            result = driver.execute_script(start_video_script)
-            logger.info(f"Video başlatma sonucu: {result}")
-        except Exception as js_error:
-            logger.warning(f"Video başlatma script hatası: {js_error}")
-
-        # Video yüklenmesi ve network request'lerin oluşması için bekle
-        logger.info(
-            "Video yüklenmesi ve manifest oluşması için 35 saniye bekleniyor..."
-        )
-
-        # Aşamalı bekleme - her 5 saniyede bir kontrol et
-        for i in range(7):  # 7 x 5 = 35 saniye
-            time.sleep(5)
-            try:
-                # Video durumunu kontrol et
-                video_status = driver.execute_script("""
-                    const videos = document.querySelectorAll('video');
-                    if (videos.length > 0) {
-                        const video = videos[0];
-                        return {
-                            currentTime: video.currentTime,
-                            duration: video.duration,
-                            readyState: video.readyState,
-                            networkState: video.networkState,
-                            src: video.src || video.currentSrc
-                        };
-                    }
-                    return null;
-                """)
-                if video_status and video_status.get("currentTime", 0) > 0:
-                    logger.info(f"Video oynatılıyor: {video_status}")
-                    break
-            except:
-                pass
-
-        # Network request'leri analiz et
-        requests = driver.requests
-        manifest_keywords = [
-            ".m3u8",
-            "master.txt",
-            "playlist.m3u8",
-            "index.m3u8",
-            "manifest",
-        ]
-        ad_domains = [
-            "video.twimg.com",
-            "1king-dizibox.pages.dev",
-            "googleads",
-            "doubleclick",
-        ]
-
-        manifest_url = None
-        headers = {}
-
-        logger.info(f"Toplam {len(requests)} request analiz ediliyor...")
-
-        # Manifest request'leri filtrele ve sırala
-        manifest_candidates = []
-
-        for req in requests:
-            url_lower = req.url.lower()
-
-            # Manifest dosyası kontrolü
-            if any(keyword in url_lower for keyword in manifest_keywords):
-                # Reklam sunucusu kontrolü
-                if not any(ad_domain in url_lower for ad_domain in ad_domains):
-                    # Response kontrolü
-                    if hasattr(req, "response") and req.response:
-                        status_code = getattr(req.response, "status_code", 0)
-                        if status_code == 200:
-                            # Content-Type kontrolü
-                            content_type = ""
-                            if hasattr(req.response, "headers"):
-                                content_type = req.response.headers.get(
-                                    "content-type", ""
-                                ).lower()
-
-                            manifest_candidates.append(
-                                {
-                                    "url": req.url,
-                                    "headers": getattr(req, "headers", {}),
-                                    "content_type": content_type,
-                                    "timestamp": getattr(req, "date", None),
-                                }
-                            )
-
-        # En uygun manifest'i seç
-        if manifest_candidates:
-            # Son eklenen ve en uygun olanı seç
-            manifest_candidates.sort(key=lambda x: x["timestamp"] or "", reverse=True)
-
-            for candidate in manifest_candidates:
-                # .m3u8 dosyalarını öncelikle
-                if ".m3u8" in candidate["url"].lower():
-                    manifest_url = candidate["url"]
-                    headers = {
-                        "User-Agent": candidate["headers"].get(
-                            "User-Agent", config.USER_AGENT
-                        ),
-                        "Referer": candidate["headers"].get("Referer", iframe_url),
-                        "Cookie": candidate["headers"].get("Cookie", ""),
-                        "Origin": "https://dizibox8.com",
-                    }
-                    logger.info(f"Network'ten manifest bulundu: {manifest_url[:80]}...")
-                    break
-
-        # Network'ten bulamazsak DOM'dan daha kapsamlı arama
-        if not manifest_url:
-            logger.info("Network'ten bulunamadı, DOM'da kapsamlı arama yapılıyor...")
-
-            dom_sources = driver.execute_script("""
-                const sources = new Set();
-                
-                // Video elementlerinden
-                document.querySelectorAll('video').forEach(video => {
-                    if (video.src) sources.add(video.src);
-                    if (video.currentSrc) sources.add(video.currentSrc);
-                    
-                    video.querySelectorAll('source').forEach(source => {
-                        if (source.src) sources.add(source.src);
-                    });
-                });
-                
-                // HLS.js veya benzeri player'lardan
-                if (window.hls && window.hls.url) sources.add(window.hls.url);
-                if (window.player && window.player.source) sources.add(window.player.source);
-                
-                // Script tag'lerinden
-                document.querySelectorAll('script').forEach(script => {
-                    const text = script.textContent || script.innerText || '';
-                    const matches = text.match(/https?:\\/\\/[^"'\\s]+\\.(m3u8|txt|manifest)/gi);
-                    if (matches) matches.forEach(match => sources.add(match));
-                });
-                
-                // Data attribute'larından
-                document.querySelectorAll('[data-src], [data-video], [data-stream]').forEach(el => {
-                    ['data-src', 'data-video', 'data-stream'].forEach(attr => {
-                        const val = el.getAttribute(attr);
-                        if (val && val.includes('http')) sources.add(val);
-                    });
-                });
-                
-                return Array.from(sources);
-            """)
-
-            for source in dom_sources:
-                if any(keyword in source.lower() for keyword in manifest_keywords):
-                    # Reklam kontrolü
-                    if not any(ad_domain in source.lower() for ad_domain in ad_domains):
-                        manifest_url = source
-                        headers = {
-                            "Referer": iframe_url,
-                            "User-Agent": config.USER_AGENT,
-                            "Origin": "https://dizibox8.com",
-                        }
-                        logger.info(f"DOM'dan manifest bulundu: {manifest_url[:80]}...")
-                        break
-
-        if not manifest_url:
-            logger.error("Hiçbir yöntemle manifest bulunamadı")
-
-            # Debug bilgisi
-            logger.info("Debug: Son network request'leri:")
-            for req in list(requests)[-10:]:
-                logger.info(f"  {req.url[:100]}")
-
+        if not match:
+            # --- HATA AYIKLAMA ÖZELLİĞİ ---
+            debug_folder = "debug_logs"
+            os.makedirs(debug_folder, exist_ok=True)
+            filename = f"error_page_source_{int(time.time())}.html"
+            filepath = os.path.join(debug_folder, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(page_source)
+            logger.error(
+                f"Sayfa kaynağında şifreleme verisi bulunamadı. Sayfa içeriği şuraya kaydedildi: {filepath}"
+            )
+            # --- HATA AYIKLAMA SONU ---
             return None, None
 
-        return manifest_url, headers
+        encrypted_data = match.group(1)
+        password = match.group(2)
+        logger.info("Şifreleme verisi ve parola başarıyla bulundu.")
 
-    except TimeoutException:
-        logger.warning(f"Timeout oluştu: {target_url}")
-        return None, None
+        decrypted_html = decrypt_aes(encrypted_data, password)
+        if not decrypted_html:
+            return None, None
+
+        # 7. Adım: Şifresi çözülmüş HTML'den asıl video linkini çıkar
+        source_match = re.search(r'src="([^"]+\.(?:m3u8|mp4))"', decrypted_html)
+        if not source_match:
+            logger.error("Çözülmüş HTML içinde video linki bulunamadı.")
+            return None, None
+
+        final_video_url = source_match.group(1)
+        referer_url = iframe2_url
+
+        logger.info(f"Asıl video linki başarıyla çözüldü: {final_video_url}")
+        return final_video_url, referer_url
+
     except Exception as e:
-        logger.error(f"Manifest arama hatası: {e}", exc_info=True)
+        logger.error(
+            f"Video kaynağı aranırken genel bir hata oluştu: {e}", exc_info=True
+        )
         return None, None
     finally:
         if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+            driver.quit()
 
 
 def download_with_yt_dlp(
-    conn, item_id, item_type, manifest_url, headers, output_template, speed_limit
+    conn, item_id, item_type, video_url, referer, output_template, speed_limit
 ):
-    """
-    yt-dlp ile video indirme
-    """
+    """Verilen video linkini yt-dlp ile indirir."""
     final_output = f"{output_template}.%(ext)s"
-
     cmd = [
         "yt-dlp",
         "--newline",
         "--no-check-certificates",
-        "--no-color",
         "--progress",
         "--verbose",
-        "--ignore-errors",
         "--hls-use-mpegts",
         "--merge-output-format",
         "mp4",
         "--format",
-        "best[ext=mp4]/best",
-        "--socket-timeout",
-        "30",
-        "--retries",
-        "3",
-        "--fragment-retries",
-        "3",
+        "best",
         "-o",
         final_output,
     ]
 
-    # Hız limiti
     if speed_limit:
         cmd.extend(["--limit-rate", speed_limit])
 
-    # Header'lar
-    if headers:
-        for key, value in headers.items():
-            if value:  # Boş header'ları ekleme
-                cmd.extend(["--add-header", f"{key}: {value}"])
+    if referer:
+        cmd.extend(["--referer", referer])
 
-    # Referer
-    if headers and headers.get("Referer"):
-        cmd.extend(["--referer", headers["Referer"]])
+    cmd.append(video_url)
 
-    cmd.append(manifest_url)
-
-    logger.info(f"yt-dlp başlatılıyor...")
-
+    logger.info(f"yt-dlp ile indirme başlatılıyor...")
     try:
         process = subprocess.Popen(
             cmd,
@@ -447,74 +221,46 @@ def download_with_yt_dlp(
             stderr=subprocess.STDOUT,
             encoding="utf-8",
             errors="ignore",
-            preexec_fn=os.setsid if sys.platform != "win32" else None,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            if sys.platform == "win32"
-            else 0,
         )
 
-        output = ""
-        last_progress = 0
-
+        output, last_progress = "", 0
         for line in iter(process.stdout.readline, ""):
             if not line:
                 break
-
             output += line
-
-            # Progress tracking
-            progress_match = re.search(r"\[download\]\s+([0-9\.]+)%", line)
-            if progress_match:
-                try:
-                    progress = float(progress_match.group(1))
-                    if progress > last_progress:
-                        _update_status_worker(
-                            conn, item_id, item_type, progress=progress
-                        )
-                        last_progress = progress
-                except:
-                    pass
-
+            if "[download]" in line:
+                progress_match = re.search(r"([0-9\.]+)%", line)
+                if progress_match:
+                    try:
+                        progress = float(progress_match.group(1))
+                        if progress > last_progress:
+                            _update_status_worker(
+                                conn, item_id, item_type, progress=progress
+                            )
+                            last_progress = progress
+                    except:
+                        pass
         process.wait()
 
         if process.returncode == 0:
-            # İndirilen dosyayı bul
             possible_files = glob.glob(f"{output_template}.*")
-            if possible_files:
-                actual_file = possible_files[0]
-                if (
-                    os.path.exists(actual_file)
-                    and os.path.getsize(actual_file) > 1024 * 1024
-                ):  # 1MB+
-                    return True, actual_file
-                else:
-                    return (
-                        False,
-                        f"Dosya çok küçük: {os.path.getsize(actual_file) if os.path.exists(actual_file) else 0} bytes",
-                    )
+            if possible_files and os.path.getsize(possible_files[0]) > 1024 * 1024:
+                return True, possible_files[0]
             else:
-                return False, "İndirme tamamlandı ama dosya bulunamadı"
+                file_size = os.path.getsize(possible_files[0]) if possible_files else 0
+                return False, f"Hata: İndirilen dosya çok küçük ({file_size} bytes)"
         else:
-            # Hata analizi
-            if "403" in output or "Forbidden" in output:
-                return False, "Hata: Sunucu erişimi reddetti (403)"
-            elif "security error" in output.lower():
-                return False, "Hata: Güvenlik hatası - DRM korumalı içerik olabilir"
-            elif "404" in output:
-                return False, "Hata: Video kaynağı bulunamadı (404)"
-            else:
-                return False, f"İndirme hatası (kod: {process.returncode})"
+            logger.error(f"yt-dlp hatası (kod: {process.returncode}): {output[-500:]}")
+            return False, f"İndirme hatası (kod: {process.returncode})"
 
     except Exception as e:
         return False, f"Process hatası: {str(e)}"
 
 
 def to_ascii_safe(text):
-    """Dosya adları için güvenli karakter dönüşümü"""
+    """Dosya adları için güvenli karakter dönüşümü."""
     if not text:
         return ""
-
-    # Türkçe karakterler
     replacements = {
         "ı": "i",
         "İ": "I",
@@ -529,65 +275,39 @@ def to_ascii_safe(text):
         "ç": "c",
         "Ç": "C",
     }
-
     for tr, en in replacements.items():
         text = text.replace(tr, en)
-
-    # Dosya sistemi için güvenli olmayan karakterleri temizle
     text = re.sub(r'[<>:"/\\|?*]', "_", text)
-    text = re.sub(r"[^\x00-\x7F]+", "", text)  # ASCII olmayan
-
+    text = re.sub(r"[^\x00-\x7F]+", "", text)
     return text.strip()
 
 
 def process_video(item_id, item_type):
-    """
-    Ana video işleme fonksiyonu - basitleştirilmiş ve stabil
-    """
+    """Ana video işleme süreci."""
     global logger
     if not logger.handlers:
         logger = setup_logging()
 
     conn = None
-    profile_dir = None
+    profile_dir = os.path.abspath(os.path.join("chrome_profiles", f"user_{item_id}"))
+    if os.path.exists(profile_dir):
+        shutil.rmtree(profile_dir)
+    os.makedirs(profile_dir, exist_ok=True)
 
     try:
-        # Chrome profil dizini
-        profile_dir = os.path.abspath(
-            os.path.join("chrome_profiles", f"user_{item_id}")
-        )
-        if os.path.exists(profile_dir):
-            shutil.rmtree(profile_dir)
-        os.makedirs(profile_dir, exist_ok=True)
-
-        # DB bağlantısı
         conn = sqlite3.connect(config.DATABASE)
         conn.row_factory = sqlite3.Row
         settings = get_all_settings_from_db(conn)
-
-        # Episode bilgileri
         item = conn.execute(
-            """
-            SELECT e.*, s.season_number, ser.title as series_title 
-            FROM episodes e 
-            JOIN seasons s ON e.season_id = s.id 
-            JOIN series ser ON s.series_id = ser.id 
-            WHERE e.id = ?
-        """,
+            "SELECT e.*, s.season_number, ser.title as series_title FROM episodes e JOIN seasons s ON e.season_id = s.id JOIN series ser ON s.series_id = ser.id WHERE e.id = ?",
             (item_id,),
         ).fetchone()
-
         if not item:
             logger.error(f"Episode ID {item_id} bulunamadı")
             return
 
-        # Dosya yolu hazırla
         base_folder = settings.get("DOWNLOADS_FOLDER", "downloads")
-        filename_template = settings.get(
-            "SERIES_FILENAME_TEMPLATE",
-            "{series_title}/Season {season_number:02d}/{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}",
-        )
-
+        filename_template = settings.get("SERIES_FILENAME_TEMPLATE")
         file_path = filename_template.format(
             series_title=to_ascii_safe(item["series_title"]),
             season_number=item["season_number"],
@@ -596,52 +316,42 @@ def process_video(item_id, item_type):
                 item["title"] or f"Episode_{item['episode_number']}"
             ),
         )
-
         full_path = os.path.join(base_folder, *file_path.split(os.path.sep))
         final_dir = os.path.dirname(full_path)
         os.makedirs(final_dir, exist_ok=True)
-
         output_template = os.path.join(final_dir, os.path.basename(full_path))
 
-        logger.info(
-            f"ID {item_id} başlatıldı: {item['series_title']} S{item['season_number']:02d}E{item['episode_number']:02d}"
-        )
-
-        # Kaynak arama
         _update_status_worker(conn, item_id, item_type, status="Kaynak aranıyor...")
-        manifest_url, headers = find_manifest_url(item["url"], profile_dir)
+        video_url, referer = find_video_source(item["url"], profile_dir)
 
-        if not manifest_url:
+        if not video_url:
             _update_status_worker(
                 conn, item_id, item_type, status="Hata: Video kaynağı bulunamadı"
             )
             return
 
-        # İndirme
         _update_status_worker(conn, item_id, item_type, status="İndiriliyor")
         success, result = download_with_yt_dlp(
             conn,
             item_id,
             item_type,
-            manifest_url,
-            headers,
+            video_url,
+            referer,
             output_template,
             settings.get("SPEED_LIMIT"),
         )
 
         if success:
-            file_path = result
-            file_size = os.path.getsize(file_path)
             _update_status_worker(
                 conn,
                 item_id,
                 item_type,
                 status="Tamamlandı",
                 progress=100,
-                filepath=file_path,
+                filepath=result,
             )
             logger.info(
-                f"ID {item_id} tamamlandı: {file_path} ({file_size / 1024 / 1024:.1f}MB)"
+                f"ID {item_id} tamamlandı: {result} ({os.path.getsize(result) / 1024 / 1024:.1f}MB)"
             )
         else:
             _update_status_worker(conn, item_id, item_type, status=result)
